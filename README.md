@@ -144,3 +144,4 @@ export default tseslint.config([
   },
 ])
 ```
+# SnapText
