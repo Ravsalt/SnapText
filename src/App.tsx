@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef } from 'react';
 import type { ChangeEvent, DragEvent, KeyboardEvent } from 'react';
 import { Button } from "./components/ui/button"
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "./components/ui/card"
@@ -104,49 +104,150 @@ export default function App() {
     }
   };
 
+  // Helper function to convert file to base64
+  const fileToBase64 = (file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.readAsDataURL(file);
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = error => reject(error);
+    });
+  };
+
+  // Helper function to optimize image before upload
+  const optimizeImage = (file: File): Promise<File> => {
+    return new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        const img = new Image();
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          const MAX_WIDTH = 2000;
+          const MAX_HEIGHT = 2000;
+          let { width, height } = img;
+
+          // Calculate new dimensions
+          if (width > height) {
+            if (width > MAX_WIDTH) {
+              height *= MAX_WIDTH / width;
+              width = MAX_WIDTH;
+            }
+          } else {
+            if (height > MAX_HEIGHT) {
+              width *= MAX_HEIGHT / height;
+              height = MAX_HEIGHT;
+            }
+          }
+
+          // Draw image on canvas with new dimensions
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          ctx?.drawImage(img, 0, 0, width, height);
+
+          // Convert back to file
+          canvas.toBlob((blob) => {
+            if (blob) {
+              const optimizedFile = new File([blob], file.name, {
+                type: 'image/jpeg',
+                lastModified: Date.now(),
+              });
+              resolve(optimizedFile);
+            } else {
+              resolve(file); // Fallback to original if optimization fails
+            }
+          }, 'image/jpeg', 0.8); // 0.8 quality for good balance
+        };
+        img.src = event.target?.result as string;
+      };
+      reader.readAsDataURL(file);
+    });
+  };
+
   const handleUpload = async () => {
     if (!image) return;
 
     setIsLoading(true);
-    setProgress(30);
+    setProgress(10);
     
-    const formData = new FormData();
-    formData.append('image', image);
-
-    setError(null);
     try {
-      console.log('Sending request to server...');
-      const response = await fetch('/api/extract-text', {
+      // Optimize the image before upload
+      setProgress(20);
+      const optimizedImage = await optimizeImage(image);
+      
+      const formData = new FormData();
+      formData.append('base64Image', await fileToBase64(optimizedImage));
+      formData.append('language', 'eng');
+      formData.append('isOverlayRequired', 'false');
+      formData.append('isTable', 'false');
+      formData.append('scale', 'true');
+      formData.append('OCREngine', '2'); // 1 for legacy, 2 for new neural network
+
+      setError(null);
+      console.log('Sending to OCR.Space...');
+      
+      // Add AbortController for timeout
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s timeout for OCR
+
+      setProgress(40);
+      
+      // Get your free key from https://ocr.space/ocrapi/freekey
+      const apiKey = import.meta.env.VITE_OCR_SPACE_API_KEY;
+      if (!apiKey) {
+        throw new Error('OCR.Space API key is not configured. Please check your .env file.');
+      }
+      const response = await fetch('https://api.ocr.space/parse/image', {
         method: 'POST',
         body: formData,
+        signal: controller.signal,
+        headers: {
+          'apikey': apiKey,
+        },
       });
       
+      clearTimeout(timeoutId);
       setProgress(70);
       
       const responseData = await response.json();
-      
+
       if (!response.ok) {
-        console.error('API Error:', response.status, response.statusText, responseData);
-        throw new Error(
-          responseData.error || 
-          responseData.details || 
-          `Server error: ${response.status} ${response.statusText}`
-        );
+        throw new Error(responseData.error || `OCR error: ${response.status}`);
       }
-      
-      setExtractedText(responseData.text || 'No text could be extracted');
+
+      if (responseData.IsErroredOnProcessing) {
+        throw new Error(responseData.ErrorMessage || 'Error processing image');
+      }
+
+      // Extract text from all parsed results
+      const extractedText = responseData.ParsedResults
+        ? responseData.ParsedResults
+            .map((result: any) => result.ParsedText || '')
+            .join('\n')
+            .trim()
+        : '';
+
+      setExtractedText(extractedText || 'No text could be extracted');
       setError(null);
+      
     } catch (error) {
-      console.error('Error:', error);
-      const errorMessage = error instanceof Error ? error.message : 'An unknown error occurred';
-      setError(`Error: ${errorMessage}`);
+      console.error('Upload error:', error);
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        setError('Request timed out. Please try again with a smaller image or better connection.');
+      } else if (error instanceof SyntaxError) {
+        setError('Error: Invalid response from server.');
+      } else {
+        const errorMessage = error instanceof Error ? error.message : 'An unknown error occurred';
+        setError(`Error: ${errorMessage}`);
+      }
       setExtractedText('');
     } finally {
       setProgress(100);
+      // Small delay to show completion before resetting
       setTimeout(() => {
         setIsLoading(false);
         setProgress(0);
-      }, 500);
+      }, 300);
     }
   };
 
